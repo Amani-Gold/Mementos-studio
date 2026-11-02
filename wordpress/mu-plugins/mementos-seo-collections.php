@@ -4,7 +4,7 @@
  * Description: Crawlable SEO metadata + Product JSON-LD for the /collections/ configurator pages, driven by the live
  *              mementos/v1/config catalog (no hardcoded prices). 301s legacy /product/ URLs and adds the collection
  *              URLs to the AIOSEO sitemap. Does not change the configurator itself.
- * Version:     1.1.1
+ * Version:     1.2.0
  *
  * Install: copy to wp-content/mu-plugins/. Remove the file to roll back — it stores nothing in the database
  * except a 1-hour transient (mementos_seo_cfg).
@@ -88,12 +88,33 @@ function mementos_seo_collection_data( $cfg, $url_slug, $url ) {
 	}
 
 	$prices = array();
+	$highs  = array();
+	$rows   = array();
 	$sizes  = array();
 	if ( ! empty( $cfg['sizes'][ $slug ] ) && is_array( $cfg['sizes'][ $slug ] ) ) {
-		foreach ( $cfg['sizes'][ $slug ] as $variant ) {
+		foreach ( $cfg['sizes'][ $slug ] as $variant_key => $variant ) {
 			foreach ( (array) $variant as $s ) {
 				if ( isset( $s['base_price'] ) && is_numeric( $s['base_price'] ) && $s['base_price'] > 0 ) {
-					$prices[] = (float) $s['base_price'];
+					// A Luxury album must carry a resin or wood plate (the configurator has no "none"),
+					// so its real starting price is base + the cheaper plate for that size.
+					$plates = array();
+					foreach ( array( 'plate_resin', 'plate_wood' ) as $pk ) {
+						if ( isset( $s[ $pk ] ) && is_numeric( $s[ $pk ] ) && $s[ $pk ] > 0 ) {
+							$plates[] = (float) $s[ $pk ];
+						}
+					}
+					$from     = (float) $s['base_price'] + ( $plates ? min( $plates ) : 0 );
+					$prices[] = $from;
+					$highs[]  = (float) $s['base_price'] + ( $plates ? max( $plates ) : 0 );
+					$rows[]   = array(
+						'variant' => (string) $variant_key,
+						'size'    => str_replace( 'x', '×', (string) ( isset( $s['display'] ) ? $s['display'] : $s['label'] ) ),
+						'from'    => $from,
+						'min'     => isset( $s['min_sheets'] ) ? (int) $s['min_sheets'] : 0,
+						'max'     => isset( $s['max_sheets'] ) ? (int) $s['max_sheets'] : 0,
+						'extra'   => isset( $s['extra_sheet_price'] ) ? (float) $s['extra_sheet_price'] : 0,
+						'plate'   => (bool) $plates,
+					);
 				}
 				if ( ! empty( $s['display'] ) && false === strpos( $s['display'], '+' ) ) {
 					$sizes[ str_replace( 'x', '×', $s['display'] ) ] = true;
@@ -129,7 +150,7 @@ function mementos_seo_collection_data( $cfg, $url_slug, $url ) {
 
 	$currency = ( isset( $cfg['currency'] ) && 'BD' === strtoupper( $cfg['currency'] ) ) ? 'BHD' : ( isset( $cfg['currency'] ) ? $cfg['currency'] : 'BHD' );
 	$low      = $prices ? min( $prices ) : null;
-	$high     = $prices ? max( $prices ) : null;
+	$high     = $highs ? max( $highs ) : null;
 	$fmt      = function ( $p ) {
 		return rtrim( rtrim( number_format( $p, 3, '.', '' ), '0' ), '.' );
 	};
@@ -204,7 +225,109 @@ function mementos_seo_collection_data( $cfg, $url_slug, $url ) {
 		'url'         => $url,
 		'image'       => $images ? $images[0] : '',
 		'jsonld'      => $graph,
+		'details'     => mementos_seo_details_html( $cfg, $col, $name, $short, $rows, $fmt ),
 	);
+}
+
+/**
+ * Visible, server-rendered collection details shown BELOW the configurator: the same live catalog
+ * the configurator reads, so crawlers and shoppers get real text, sizes and prices.
+ */
+function mementos_seo_details_html( $cfg, $col, $name, $short, $rows, $fmt ) {
+	$h  = 'esc_html';
+	$vl = array(
+		'solo_hard' => 'Hardbound',
+		'solo_soft' => 'Softbound',
+		'single'    => 'Album',
+		'double'    => 'Album set',
+	);
+	$o  = '<main class="msd" id="collection-details" aria-labelledby="msd-title"><div class="msd-in">';
+	$o .= '<p class="msd-eyebrow">Mementos Studio · Handcrafted in Bahrain</p>';
+	$o .= '<h1 id="msd-title">' . $h( $name ) . '</h1>';
+	$o .= '<p class="msd-lead">' . $h( $short ) . ' Each album is made by hand in our Bahrain studio. Design it online above: choose your size, cover material, colour and finish';
+	$s  = isset( $cfg['settings'] ) && is_array( $cfg['settings'] ) ? $cfg['settings'] : array();
+	if ( ! empty( $s['method_design_my_album_enabled'] ) && ! empty( $s['method_upload_spreads_enabled'] ) ) {
+		$o .= ', then lay out your pages in the album designer or upload finished spreads';
+	}
+	$o .= '.</p>';
+	$o .= '<p><a class="msd-cta" href="#top" onclick="window.scrollTo({top:0,behavior:\'smooth\'});return false;">Start designing</a></p>';
+
+	if ( $rows ) {
+		$multi = count( array_unique( wp_list_pluck( $rows, 'variant' ) ) ) > 1;
+		$o .= '<h2>Sizes and prices</h2><div class="msd-tw"><table class="msd-t"><thead><tr>';
+		$o .= ( $multi ? '<th scope="col">Type</th>' : '' ) . '<th scope="col">Size (in)</th><th scope="col">From (BD)</th><th scope="col">Sheets included</th><th scope="col">Extra sheet (BD)</th></tr></thead><tbody>';
+		foreach ( $rows as $r ) {
+			$o .= '<tr>' . ( $multi ? '<td>' . $h( isset( $vl[ $r['variant'] ] ) ? $vl[ $r['variant'] ] : ucfirst( $r['variant'] ) ) . '</td>' : '' );
+			$o .= '<td>' . $h( $r['size'] ) . '</td><td>' . $h( $fmt( $r['from'] ) ) . '</td>';
+			$o .= '<td>' . ( $r['min'] ? $h( $r['min'] . ( $r['max'] ? ' (up to ' . $r['max'] . ')' : '' ) ) : '' ) . '</td>';
+			$o .= '<td>' . ( $r['extra'] > 0 ? $h( $fmt( $r['extra'] ) ) : '' ) . '</td></tr>';
+		}
+		$o .= '</tbody></table></div>';
+		$notes = array( 'Starting prices include the sheets shown; the designer calculates your exact total before you order.' );
+		if ( ! empty( $s['linen_surcharge'] ) ) {
+			$notes[] = 'Linen covers add ' . $fmt( (float) $s['linen_surcharge'] ) . ' BD.';
+		}
+		if ( in_array( true, wp_list_pluck( $rows, 'plate' ), true ) ) {
+			$notes[] = 'Prices include the cheaper decorative plate for each size; the other plate type costs more.';
+		}
+		$o .= '<p class="msd-note">' . $h( implode( ' ', $notes ) ) . '</p>';
+	}
+
+	$colors = isset( $cfg['colors'] ) && is_array( $cfg['colors'] ) ? $cfg['colors'] : array();
+	$mats   = isset( $cfg['materials'] ) && is_array( $cfg['materials'] ) ? $cfg['materials'] : array();
+	if ( $mats ) {
+		$o .= '<h2>Cover materials and colours</h2><dl class="msd-dl">';
+		foreach ( $mats as $m ) {
+			if ( empty( $m['slug'] ) ) {
+				continue;
+			}
+			$label = 'chamios' === $m['slug'] ? 'Chamois' : (string) $m['name'];
+			$names = array_filter( wp_list_pluck( isset( $colors[ $m['slug'] ] ) ? (array) $colors[ $m['slug'] ] : array(), 'name' ) );
+			$o    .= '<dt>' . $h( $label ) . '</dt><dd>' . $h( rtrim( (string) ( isset( $m['description'] ) ? $m['description'] : '' ), '.' ) );
+			if ( $names ) {
+				$o .= '. ' . $h( count( $names ) . ' colours: ' . implode( ', ', $names ) ) . '.';
+			}
+			$o .= '</dd>';
+		}
+		$o .= '</dl>';
+	}
+
+	$extras = array();
+	if ( ! empty( $col['is_luxury'] ) && ! empty( $cfg['plate'] ) ) {
+		$pl = $cfg['plate'];
+		$rc = isset( $pl['resin']['colors'] ) ? count( (array) $pl['resin']['colors'] ) : 0;
+		$wc = isset( $pl['wood']['colors'] ) ? count( (array) $pl['wood']['colors'] ) : 0;
+		$wd = isset( $pl['wood']['designs'] ) ? count( (array) $pl['wood']['designs'] ) : 0;
+		$extras[] = 'Decorative cover plate: resin (' . $rc . ' colours) or wood (' . $wc . ' finishes, ' . $wd . ' designs).';
+	}
+	if ( ! empty( $cfg['foiling_colors'] ) ) {
+		$extras[] = 'Cover foiling: ' . implode( ', ', array_map( 'strval', (array) $cfg['foiling_colors'] ) ) . '.';
+	}
+	$extras[] = ! empty( $col['has_box'] ) ? 'Presented in a matching box.' : 'Album only, without a presentation box.';
+	$o .= '<h2>Finishing</h2><ul>';
+	foreach ( $extras as $x ) {
+		$o .= '<li>' . $h( $x ) . '</li>';
+	}
+	$o .= '</ul>';
+
+	$o .= '<h2>Before you order</h2><ul class="msd-links">';
+	foreach ( array(
+		'/how-to-order-a-custom-album/'   => 'How to order a custom photo album',
+		'/softbound-vs-hardbound-album/'  => 'Softbound vs hardbound albums',
+		'/linen-vs-chamois-album-covers/' => 'Linen vs chamois covers',
+	) as $path => $label ) {
+		$o .= '<li><a href="' . esc_url( home_url( $path ) ) . '">' . $h( $label ) . '</a></li>';
+	}
+	$o .= '</ul></div></main>';
+
+	$o .= '<style>.msd{background:#fbf8f2;color:#2b2622;font:16px/1.6 Georgia,"Times New Roman",serif;padding:56px 16px 72px;border-top:1px solid #e7dfd2}'
+		. '.msd-in{max-width:880px;margin:0 auto}.msd h1{font-size:2rem;line-height:1.2;margin:.2em 0 .4em;font-weight:600}'
+		. '.msd h2{font-size:1.3rem;margin:2em 0 .6em;font-weight:600}.msd-eyebrow{font:600 12px/1.4 system-ui,sans-serif;letter-spacing:.12em;text-transform:uppercase;color:#8a7a66;margin:0}'
+		. '.msd-lead{font-size:1.08rem;max-width:68ch}.msd-cta{display:inline-block;background:#2b2622;color:#fbf8f2;text-decoration:none;font:600 14px/1 system-ui,sans-serif;letter-spacing:.06em;text-transform:uppercase;padding:14px 22px;border-radius:2px}'
+		. '.msd-tw{overflow-x:auto}.msd-t{width:100%;border-collapse:collapse;font:15px/1.4 system-ui,sans-serif}.msd-t th,.msd-t td{text-align:left;padding:10px 12px;border-bottom:1px solid #e7dfd2;white-space:nowrap}'
+		. '.msd-t th{font-weight:600;color:#5c5047}.msd-note{font:14px/1.5 system-ui,sans-serif;color:#6b5f55}.msd-dl dt{font-weight:600;margin-top:.8em}.msd-dl dd{margin:0}'
+		. '.msd a{color:#2b2622}.msd a.msd-cta{color:#fbf8f2}.msd-links a{text-underline-offset:3px}</style>';
+	return $o;
 }
 
 /** Render the <head> tags for one collection. */
@@ -240,7 +363,26 @@ function mementos_seo_filter_html( $html, $d ) {
 	if ( false === $pos ) {
 		return $html;
 	}
-	return substr( $html, 0, $pos ) . mementos_seo_head_html( $d ) . substr( $html, $pos );
+	$html = substr( $html, 0, $pos ) . mementos_seo_head_html( $d ) . substr( $html, $pos );
+	return empty( $d['details'] ) ? $html : mementos_seo_add_details( $html, $d['details'] );
+}
+
+/**
+ * Let the page scroll past the full-screen configurator and add the details section under it.
+ * Only when the album-designer markup is exactly as expected; otherwise the page is left untouched.
+ */
+function mementos_seo_add_details( $html, $details ) {
+	$lock  = 'html,body{height:100%;overflow:hidden;margin:0}';
+	$frame = '.mad-frame{position:fixed;inset:0;width:100vw;height:100vh;height:100dvh;border:0;display:block}';
+	$end   = strripos( $html, '</body>' );
+	if ( false === strpos( $html, $lock ) || false === strpos( $html, $frame ) || false === $end ) {
+		return $html;
+	}
+	$html = str_replace( $lock, 'html,body{margin:0}', $html );
+	$html = str_replace( $frame, '.mad-frame{position:relative;width:100%;height:100vh;height:100dvh;border:0;display:block}', $html );
+	$html = preg_replace( '#<body([^>]*)>#i', '<body$1 id="top">', $html, 1 );
+	$end  = strripos( $html, '</body>' );
+	return substr( $html, 0, $end ) . $details . "\n" . substr( $html, $end );
 }
 
 // 1) 301 legacy product URLs (the album-designer plugin currently answers them with a 302).
