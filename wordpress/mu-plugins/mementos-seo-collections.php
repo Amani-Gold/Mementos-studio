@@ -4,7 +4,7 @@
  * Description: Crawlable SEO metadata + Product JSON-LD for the /collections/ configurator pages, driven by the live
  *              mementos/v1/config catalog (no hardcoded prices). 301s legacy /product/ URLs and adds the collection
  *              URLs to the AIOSEO sitemap. Does not change the configurator itself.
- * Version:     1.0.2
+ * Version:     1.1.1
  *
  * Install: copy to wp-content/mu-plugins/. Remove the file to roll back — it stores nothing in the database
  * except a 1-hour transient (mementos_seo_cfg).
@@ -224,7 +224,9 @@ function mementos_seo_head_html( $d ) {
 		$out .= '<meta property="og:image" content="' . esc_url( $d['image'] ) . "\">\n";
 	}
 	$out .= '<meta name="twitter:card" content="summary_large_image">' . "\n";
-	$out .= '<script type="application/ld+json">' . wp_json_encode( $d['jsonld'], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE ) . "</script>\n";
+	if ( ! empty( $d['jsonld'] ) ) {
+		$out .= '<script type="application/ld+json">' . wp_json_encode( $d['jsonld'], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE ) . "</script>\n";
+	}
 	return $out;
 }
 
@@ -368,6 +370,135 @@ add_filter(
 		return $robots;
 	},
 	99
+);
+
+// 6) Single WooCommerce product pages: AIOSEO (free) emits no Product schema and these products have no
+//    description, so add a factual meta description and Product JSON-LD from the live product record.
+/** Hand-written descriptions, from facts shown on the product pages. Slug => description. */
+function mementos_seo_product_descriptions() {
+	return array(
+		'photo-print' => 'Single photo prints from Mementos Studio in Bahrain: choose your size and paper finish, upload your photos and order online, priced per print.',
+		'dazza'       => 'Customisable jewelry and dazza boxes from Mementos Studio in Bahrain, made to order for gifts and keepsakes.',
+		'wooden-frame' => 'A wooden frame in your chosen size, printed and mounted for you by Mementos Studio in Bahrain, ready to display.',
+		'self-mount'   => 'A felt-covered self-mount album from Mementos Studio, Bahrain, that you fill yourself. Printed photographs are not included.',
+		'white-filling' => 'A white filling album from Mementos Studio, Bahrain: white pages, ready for you to add your own printed photographs.',
+		'memories-album' => 'The Memories Album by Mementos Studio, Bahrain: design your album online, choosing size, cover and finish.',
+	);
+}
+
+function mementos_seo_current_product() {
+	if ( ! function_exists( 'is_product' ) || ! is_product() || ! function_exists( 'wc_get_product' ) ) {
+		return null;
+	}
+	$p = wc_get_product( get_queried_object_id() );
+	return ( $p && 'publish' === $p->get_status() ) ? $p : null;
+}
+
+function mementos_seo_product_description( $p ) {
+	$map  = mementos_seo_product_descriptions();
+	$slug = $p->get_slug();
+	if ( isset( $map[ $slug ] ) ) {
+		$d = $map[ $slug ];
+	} else {
+		$d = trim( wp_strip_all_tags( $p->get_short_description() ? $p->get_short_description() : $p->get_description() ) );
+		$d = $d ? wp_trim_words( $d, 24, '…' ) : wp_strip_all_tags( $p->get_name() ) . ' by Mementos Studio, Bahrain.';
+	}
+	$price = (float) $p->get_price();
+	if ( $price > 0 ) {
+		$d .= ' From ' . rtrim( rtrim( number_format( $price, 3, '.', '' ), '0' ), '.' ) . ' BD.';
+	}
+	return $d;
+}
+
+add_filter(
+	'aioseo_description',
+	function ( $desc ) {
+		$p = mementos_seo_current_product();
+		return ( $p && '' === trim( (string) $desc ) ) ? mementos_seo_product_description( $p ) : $desc;
+	},
+	20
+);
+
+function mementos_seo_product_jsonld( $p ) {
+		$url    = get_permalink( $p->get_id() );
+		$images = array();
+		foreach ( array_merge( array( $p->get_image_id() ), $p->get_gallery_image_ids() ) as $img ) {
+			$src = $img ? wp_get_attachment_image_url( $img, 'large' ) : '';
+			if ( $src ) {
+				$images[] = $src;
+			}
+		}
+		$product = array(
+			'@context'    => 'https://schema.org',
+			'@type'       => 'Product',
+			'@id'         => $url . '#product',
+			'name'        => wp_strip_all_tags( $p->get_name() ),
+			'description' => mementos_seo_product_description( $p ),
+			'url'         => $url,
+			'brand'       => array( '@type' => 'Brand', 'name' => 'Mementos Studio' ),
+			'manufacturer' => array( '@id' => home_url( '/#organization' ) ),
+		);
+		if ( $images ) {
+			$product['image'] = array_slice( $images, 0, 6 );
+		}
+		if ( $p->get_sku() ) {
+			$product['sku'] = $p->get_sku();
+		}
+		$price = (float) $p->get_price();
+		if ( $price > 0 ) {
+			$product['offers'] = array(
+				'@type'         => 'Offer',
+				'price'         => rtrim( rtrim( number_format( $price, 3, '.', '' ), '0' ), '.' ),
+				'priceCurrency' => function_exists( 'get_woocommerce_currency' ) ? get_woocommerce_currency() : 'BHD',
+				'availability'  => $p->is_in_stock() ? 'https://schema.org/InStock' : 'https://schema.org/OutOfStock',
+				'url'           => $url,
+				'seller'        => array( '@id' => home_url( '/#organization' ) ),
+			);
+		}
+		return "\n<!-- mementos-seo-product -->\n<script type=\"application/ld+json\">" . wp_json_encode( $product, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE ) . "</script>\n";
+}
+
+add_action(
+	'wp_head',
+	function () {
+		$p = mementos_seo_current_product();
+		if ( $p ) {
+			echo mementos_seo_product_jsonld( $p ); // phpcs:ignore WordPress.Security.EscapeOutput -- JSON-LD built with wp_json_encode.
+		}
+	},
+	30
+);
+
+// Product pages the album-designer plugin serves as a bare configurator shell (no wp_head), e.g. Memories Album:
+// add the full head set from the WooCommerce product record.
+add_action(
+	'template_redirect',
+	function () {
+		$p = mementos_seo_current_product();
+		if ( ! $p ) {
+			return;
+		}
+		ob_start(
+			function ( $html ) use ( $p ) {
+				if ( false !== stripos( $html, 'mementos-seo-product' ) || false === stripos( $html, 'mad-frame' ) ) {
+					return $html; // normal theme page, or already handled.
+				}
+				$img = wp_get_attachment_image_url( $p->get_image_id(), 'large' );
+				$d   = array(
+					'title'       => wp_strip_all_tags( $p->get_name() ) . ' — Handcrafted Photo Albums in Bahrain | Mementos Studio',
+					'description' => mementos_seo_product_description( $p ),
+					'url'         => get_permalink( $p->get_id() ),
+					'image'       => $img ? $img : '',
+					'jsonld'      => null,
+				);
+				$head = mementos_seo_head_html( $d ) . mementos_seo_product_jsonld( $p );
+				$html = preg_replace( '#<title>.*?</title>#is', '<title>' . esc_html( $d['title'] ) . '</title>', $html, 1 );
+				$pos  = stripos( $html, '</head>' );
+				return false === $pos ? $html : substr( $html, 0, $pos ) . $head . substr( $html, $pos );
+			}
+		);
+	},
+	1
 );
 
 // Refresh the cached catalog when WooCommerce products change.
