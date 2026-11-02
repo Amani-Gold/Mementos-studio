@@ -4,7 +4,7 @@
  * Description: Crawlable SEO metadata + Product JSON-LD for the /collections/ configurator pages, driven by the live
  *              mementos/v1/config catalog (no hardcoded prices). 301s legacy /product/ URLs and adds the collection
  *              URLs to the AIOSEO sitemap. Does not change the configurator itself.
- * Version:     1.0.1
+ * Version:     1.0.2
  *
  * Install: copy to wp-content/mu-plugins/. Remove the file to roll back — it stores nothing in the database
  * except a 1-hour transient (mementos_seo_cfg).
@@ -344,6 +344,30 @@ add_filter(
 	},
 	10,
 	2
+);
+
+// 5) Empty archives (demo categories/tags whose posts were unpublished, an empty /blog/) are thin pages:
+//    tell crawlers not to index them. Re-indexes automatically once real posts exist.
+add_action(
+	'template_redirect',
+	function () {
+		if ( ( is_archive() || is_home() ) && ! have_posts() && ! headers_sent() ) {
+			header( 'X-Robots-Tag: noindex, follow', true );
+		}
+	},
+	20
+);
+add_filter(
+	'wp_robots',
+	function ( $robots ) {
+		if ( ( is_archive() || is_home() ) && ! have_posts() ) {
+			$robots['noindex'] = true;
+			$robots['follow']  = true;
+			unset( $robots['index'] );
+		}
+		return $robots;
+	},
+	99
 );
 
 // Refresh the cached catalog when WooCommerce products change.
