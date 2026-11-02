@@ -17,7 +17,7 @@ The configurator, cart and checkout are untouched — the plugin only adds tags 
 
 ## Install
 
-1. Upload `mementos-seo-collections.php` to `wp-content/mu-plugins/` (create the folder if missing).
+1. Upload `mementos-seo-collections.php` to `wp-content/mu-plugins/`, or zip it in a `mementos-seo-collections/` folder and install it as a normal plugin (deployed this way on 2 Nov 2026, v1.0.1).
 2. Purge the LiteSpeed cache.
 3. Check: `curl -s https://mementos-studio.com/collections/luxury-albums/ | grep mementos-seo-collections`
    and run the URL through https://search.google.com/test/rich-results.

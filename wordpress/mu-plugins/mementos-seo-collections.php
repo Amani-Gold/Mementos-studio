@@ -4,7 +4,7 @@
  * Description: Crawlable SEO metadata + Product JSON-LD for the /collections/ configurator pages, driven by the live
  *              mementos/v1/config catalog (no hardcoded prices). 301s legacy /product/ URLs and adds the collection
  *              URLs to the AIOSEO sitemap. Does not change the configurator itself.
- * Version:     1.0.0
+ * Version:     1.0.1
  *
  * Install: copy to wp-content/mu-plugins/. Remove the file to roll back — it stores nothing in the database
  * except a 1-hour transient (mementos_seo_cfg).
@@ -303,15 +303,16 @@ add_filter(
 	}
 );
 
-// 4) Drop the redirecting /product/ URLs from AIOSEO's product sitemap — they now 301 to the collections above.
+// 4) Drop the redirecting /product/ URLs from AIOSEO's product sitemap — they now 301 to the collections above —
+//    and list the collection URLs in the page sitemap (filter 3 only runs when AIOSEO "Additional Pages" is on).
 add_filter(
 	'aioseo_sitemap_posts',
-	function ( $entries ) {
+	function ( $entries, $post_type = '' ) {
 		if ( ! is_array( $entries ) ) {
 			return $entries;
 		}
-		$r = mementos_seo_product_redirects();
-		return array_values(
+		$r       = mementos_seo_product_redirects();
+		$entries = array_values(
 			array_filter(
 				$entries,
 				function ( $e ) use ( $r ) {
@@ -320,7 +321,29 @@ add_filter(
 				}
 			)
 		);
-	}
+		if ( 'page' === $post_type ) {
+			$have = array();
+			foreach ( $entries as $e ) {
+				if ( is_array( $e ) && isset( $e['loc'] ) ) {
+					$have[ $e['loc'] ] = true;
+				}
+			}
+			foreach ( array_keys( mementos_seo_collection_map() ) as $slug ) {
+				$loc = home_url( '/collections/' . $slug . '/' );
+				if ( ! isset( $have[ $loc ] ) ) {
+					$entries[] = array(
+						'loc'        => $loc,
+						'lastmod'    => gmdate( 'c' ),
+						'changefreq' => 'weekly',
+						'priority'   => 0.9,
+					);
+				}
+			}
+		}
+		return $entries;
+	},
+	10,
+	2
 );
 
 // Refresh the cached catalog when WooCommerce products change.
